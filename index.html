@@ -70,6 +70,13 @@
     .gauge.ready { animation: pulse 0.5s infinite alternate; box-shadow: 0 0 8px #ffeaa7; }
     @keyframes pulse { from { filter: brightness(1); } to { filter: brightness(1.8); } }
     .skill-label { font-size: 11px; color: #ffeaa7; min-width: 62px; }
+    .badge.danger { background: #e74c3c; color: #fff; }
+    .gauge.rep { border-color: #55efc4; width: 60px; }
+    .gauge.rep > div { background: linear-gradient(90deg, #00b894, #55efc4); }
+    .gauge.rep.mid { border-color: #fbc531; }
+    .gauge.rep.mid > div { background: linear-gradient(90deg, #e1b12c, #fbc531); }
+    .gauge.rep.low { border-color: #ff6b6b; animation: pulse 0.4s infinite alternate; }
+    .gauge.rep.low > div { background: linear-gradient(90deg, #c0392b, #ff6b6b); }
     canvas {
       display: block;
       width: 100%;
@@ -139,7 +146,8 @@
     <div class="top-bar">
       <div class="status-item"><span>STAGE:</span><span id="ui-stage" class="badge">1</span></div>
       <div class="status-item"><span>売上:</span><span id="ui-score" style="color:#f1c40f;font-size:15px;">0 pt</span></div>
-      <div class="status-item"><span>BEST:</span><span id="ui-best" style="color:#ffeaa7;">0</span></div>
+      <div class="status-item"><span>TIME:</span><span id="ui-time" class="badge">--</span></div>
+      <div class="status-item"><span>評判:</span><div id="ui-rep" class="gauge rep"><div id="ui-rep-bar"></div></div></div>
       <div class="status-item"><span>残機:</span><span id="ui-lives" class="lives">♥♥♥</span></div>
       <div class="status-item"><span>手持ち:</span><span id="ui-holding" class="badge-item">からあげクン ×3</span></div>
       <div class="status-item">
@@ -164,7 +172,8 @@
     <span>移動: <span class="key">▲▼◄►</span> / <span class="key">WASD</span></span>
     <span>投げる(長押し連射): <span class="key">Space</span> / <span class="key">Z</span></span>
     <span>あげたてー！: <span class="key">X</span> / <span class="key">Shift</span></span>
-    <span>ポーズ: <span class="key">P</span></span>
+    <span>ポーズ: <span class="key">P</span> / <span class="key">Esc</span></span>
+    <span>タイトルへ: <span class="key">ポーズ中に Q</span></span>
     <span>サウンド: <span class="key">M</span></span>
     <span>レジ修理: <span class="key">壊れたレジの前に立つ</span></span>
     <span>リトライ: <span class="key">R</span></span>
@@ -189,7 +198,9 @@
     const ui = {
       stage: document.getElementById('ui-stage'),
       score: document.getElementById('ui-score'),
-      best: document.getElementById('ui-best'),
+      time: document.getElementById('ui-time'),
+      rep: document.getElementById('ui-rep'),
+      repBar: document.getElementById('ui-rep-bar'),
       lives: document.getElementById('ui-lives'),
       holding: document.getElementById('ui-holding'),
       gauge: document.getElementById('ui-gauge'),
@@ -238,6 +249,7 @@
       block: () => tone(700, 0.08, 'square', 0.12, 0, 1200),
       crack: () => { tone(220, 0.18, 'sawtooth', 0.2, 0, 70); tone(1400, 0.05, 'square', 0.08); },
       fix: () => tone(900, 0.04, 'square', 0.07),
+      tick: () => tone(1000, 0.05, 'square', 0.09),
       fixed: () => [700, 1050].forEach((f, i) => tone(f, 0.1, 'triangle', 0.18, i * 0.07)),
       over: () => [392, 330, 262, 196].forEach((f, i) => tone(f, 0.3, 'sawtooth', 0.2, i * 0.2))
     };
@@ -272,6 +284,7 @@
     let customers = [], thrown = [], bolts = [], powerups = [], particles = [], popups = [];
     let isNewRecord = false, lastRank = -1;
     let swayAmp = 16, touchTarget = null;
+    let rep = 100, timeLeft = 0, overReason = '';
     const registers = [100, 300, 500].map(x => ({ x, hp: 3, max: 3, fix: 0 }));
 
     let highScores = [0, 0, 0, 0, 0];
@@ -307,16 +320,20 @@
       if ((code === 'Enter' || code === 'Space') && (state === 'title' || state === 'over')) { startGame(); return; }
       if (code === 'KeyX' || code === 'ShiftLeft' || code === 'ShiftRight') shout();
       if (code === 'KeyR') startGame();
-      if (code === 'KeyP') togglePause();
+      if (code === 'KeyP' || code === 'Escape') togglePause();
+      if (code === 'KeyQ' && (state === 'paused' || state === 'over')) goTitle();
       if (code === 'KeyM') toggleMute();
     });
     window.addEventListener('keyup', (e) => { down[e.code] = false; });
     window.addEventListener('blur', () => { for (const k in down) down[k] = false; if (state === 'play') state = 'paused'; });
 
-    canvas.addEventListener('pointerdown', () => {
+    canvas.addEventListener('pointerdown', (e) => {
       initAudio();
-      if (state === 'title' || state === 'over') startGame();
-      else if (state === 'paused') togglePause();
+      const r = canvas.getBoundingClientRect();
+      const y = (e.clientY - r.top) * H / r.height;
+      if (state === 'title') startGame();
+      else if (state === 'over') { if (y > 412) goTitle(); else startGame(); }
+      else if (state === 'paused') { if (y >= 272) goTitle(); else togglePause(); }
     });
     document.querySelectorAll('[data-key]').forEach(b => {
       const code = b.dataset.key;
@@ -366,6 +383,17 @@
       ['pointerup', 'pointercancel'].forEach(ev => pad.addEventListener(ev, padEnd));
     }
 
+    // 途中でやめてタイトルへ(記録は残さない)
+    function goTitle() {
+      score = 0; combo = 0; wave = 1; lives = 3; gauge = 0; rep = 100; x2Timer = 0; timeLeft = 0;
+      customers = []; thrown = []; bolts = []; powerups = []; particles = []; popups = [];
+      waveClear = 0; entering = 0; freeze = 0; touchTarget = null; isNewRecord = false;
+      registers.forEach(r => { r.hp = r.max; r.fix = 0; });
+      warmers.forEach(w => { w.stock = w.max; w.progress = 0; });
+      player.item = 'KARAAGE'; player.count = MAX_CARRY; player.x = W / 2 - 24; player.y = 360;
+      state = 'title';
+    }
+
     function togglePause() {
       if (state === 'play') state = 'paused';
       else if (state === 'paused') state = 'play';
@@ -382,6 +410,7 @@
     function startGame() {
       initAudio();
       score = 0; combo = 0; maxCombo = 0; served = 0; lives = 3; gauge = 0; x2Timer = 0;
+      rep = 100; overReason = '';
       wave = 1; invuln = 0; shake = 0; freeze = 0; waveClear = 0; fireCD = 0;
       isNewRecord = false; lastRank = -1;
       player.x = W / 2 - 24; player.y = 360; player.item = 'KARAAGE'; player.count = MAX_CARRY;
@@ -422,13 +451,15 @@
         }
       }
       initialCount = customers.length;
+      timeLeft = Math.round(initialCount * 3.2 + 20) * 60; // 客数に応じた制限時間(フレーム)
       entering = 150;
       shotTimer = Math.max(60, 200 - wave * 12);
       addPopup(`STAGE ${wave}`, W / 2, 200, '#0066b2', 28, 100);
     }
 
-    function gameOver() {
+    function gameOver(reason) {
       if (state === 'over') return;
+      overReason = reason || 'レジ大混乱！';
       state = 'over'; shake = 12; SFX.over();
       saveHighScore(score);
       lastRank = score > 0 ? highScores.indexOf(score) : -1;
@@ -507,7 +538,31 @@
       updateThrown();
       updateBolts();
       updatePowerups();
+      updateTimer();
       checkWaveClear();
+    }
+
+    // 店の評判: 0になると閉店(ゲームオーバー)
+    function adjustRep(n) {
+      rep = Math.max(0, Math.min(100, rep + n));
+      if (rep <= 0) gameOver('評判ガタ落ちで閉店…');
+    }
+
+    // ステージの制限時間。切れるとお客さんが帰ってしまい、評判が大きく落ちる
+    function updateTimer() {
+      if (entering > 0 || waveClear > 0 || freeze > 0 || customers.length === 0) return;
+      timeLeft--;
+      if (timeLeft > 0 && timeLeft <= 600 && timeLeft % 60 === 0) SFX.tick();
+      if (timeLeft <= 0) {
+        const left = customers.length;
+        const pen = Math.min(45, 20 + left * 2);
+        customers.forEach(c => burst(ex(c), c.y, '#b2bec3', 5));
+        customers = []; bolts = []; combo = 0; waveClear = 110;
+        SFX.fail();
+        addPopup('TIME UP! お客さんが帰ってしまった…', W / 2, 170, '#e74c3c', 18, 100);
+        addPopup(`評判 -${pen}`, W / 2, 198, '#e74c3c', 15, 100);
+        adjustRep(-pen);
+      }
     }
 
     // 列(段)ごとに位相をずらして左右にゆらす → 前列のすき間から後列を狙える
@@ -622,13 +677,14 @@
         const shift = minX < WM ? WM - minX : (W - WM) - maxX;
         customers.forEach(c => { c.x += shift; c.y += DROP; });
         dir *= -1;
-        if (customers.some(c => c.y + c.r >= COUNTER_Y - 6)) { gameOver(); return; }
+        if (customers.some(c => c.y + c.r >= COUNTER_Y - 6)) { gameOver('レジ大混乱！'); return; }
       }
 
       // クレーム(行列の怒り)
       shotTimer--;
       if (shotTimer <= 0) {
-        const interval = Math.max(50, 190 - wave * 12);
+        const repMul = rep < 25 ? 0.65 : rep < 50 ? 0.8 : 1; // 評判が悪いと怒りやすい
+        const interval = Math.max(40, (190 - wave * 12) * repMul);
         shotTimer = interval * (0.6 + Math.random() * 0.8);
         const cands = customers.filter(c => !customers.some(o => o !== c && Math.abs(ex(o) - ex(c)) < 30 && o.y > c.y));
         if (cands.length) pick(cands).warn = 30;
@@ -680,6 +736,7 @@
           addGauge(5);
         } else {
           const pts = (c.kind === 'gold' ? 500 : 100) * mult; score += pts; served++;
+          adjustRep(c.kind === 'gold' ? 5 : 2);
           addPopup(`+${pts}pt`, cx, c.y - 24, '#f1c40f', 13);
           if (combo >= 3) addPopup(`${combo} COMBO!`, cx, c.y - 40, '#ff7675', 12);
           addGauge(c.kind === 'gold' ? 25 : 10);
@@ -696,6 +753,10 @@
         SFX.fail(); burst(cx, c.y, '#e74c3c', 10);
         addPopup('ちがう！ 怒った！', cx, c.y - 24, '#e74c3c', 13);
         if (c.warn === 0) { c.warn = 24; c.aim = true; }
+        const loss = Math.min(score, 60);          // 廃棄ロス(無駄になった商品の原価)
+        score -= loss;
+        addPopup(loss > 0 ? `評判 -10  廃棄ロス -${loss}pt` : '評判 -10', cx, c.y - 42, '#e67e22', 12, 60);
+        adjustRep(-10);
       }
     }
 
@@ -719,7 +780,7 @@
           lives--; combo = 0; invuln = 100; shake = 8;
           SFX.hurt(); burst(player.x + 24, player.y + 18, '#ff7675', 14);
           addPopup('クレーム！', player.x + 24, player.y - 12, '#ff4757', 15, 60);
-          if (lives <= 0) { gameOver(); return; }
+          if (lives <= 0) { gameOver('クレーム殺到！'); return; }
         }
       }
     }
@@ -748,11 +809,15 @@
         let bonus = 200 * wave;
         const intact = registers.every(r => r.hp >= r.max);
         if (intact) bonus += 300;
+        const speed = Math.ceil(timeLeft / 60) * 10; // 残り時間ボーナス
+        bonus += speed;
+        adjustRep(10);
         score += bonus; waveClear = 110; bolts = [];
         registers.forEach(r => { if (r.hp < r.max) r.hp++; r.fix = 0; }); // 応急処置
         SFX.clear();
         addPopup(`STAGE CLEAR!  +${bonus}`, W / 2, 180, '#0066b2', 22, 100);
         if (intact) addPopup('レジ無傷ボーナス +300', W / 2, 212, '#2ecc71', 14, 100);
+        if (speed > 0) addPopup(`スピードボーナス +${speed}`, W / 2, 234, '#0984e3', 13, 100);
       }
     }
 
@@ -1015,6 +1080,14 @@
           ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.strokeText(`ポイント2倍 ${Math.ceil(x2Timer / 60)}s`, 12, 32);
           ctx.fillStyle = '#d4a000'; ctx.fillText(`ポイント2倍 ${Math.ceil(x2Timer / 60)}s`, 12, 32);
         }
+        // 残り5秒からカウントダウンを大きく表示
+        if (state === 'play' && waveClear === 0 && entering <= 0 && customers.length > 0 && timeLeft > 0 && timeLeft <= 300) {
+          ctx.save();
+          ctx.globalAlpha = 0.16 + 0.14 * (timeLeft % 60) / 60;
+          ctx.fillStyle = '#e74c3c'; ctx.font = `bold 140px ${FONT}`; ctx.textAlign = 'center';
+          ctx.fillText(String(Math.ceil(timeLeft / 60)), W / 2, 230);
+          ctx.restore();
+        }
       }
 
       if (state === 'title') drawTitle();
@@ -1043,8 +1116,9 @@
         '列はゆれる。前列のすき間を狙えば後ろの列も撃てる',
         '違う商品を当てると、お客さんが怒ってこちらを狙い撃ち！',
         'レジは盾。壊れたら前に立って修理しよう',
-        'ゲージが溜まったら「あげたてー！」で一気に逆転'
-      ].forEach((t, i) => ctx.fillText(t, W / 2, 245 + i * 24));
+        'ゲージが溜まったら「あげたてー！」で一気に逆転',
+        '制限時間つき。時間切れ・誤爆で評判が落ち、0で閉店…'
+      ].forEach((t, i) => ctx.fillText(t, W / 2, 232 + i * 22));
 
       if (Math.floor(frame / 30) % 2 === 0) {
         ctx.fillStyle = '#ffeaa7'; ctx.font = `bold 18px ${FONT}`;
@@ -1055,18 +1129,23 @@
     }
 
     function drawPause() {
-      overlay(0.7);
+      overlay(0.75);
       ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = `bold 32px ${FONT}`;
-      ctx.fillText('PAUSE', W / 2, 220);
-      ctx.font = `14px ${FONT}`; ctx.fillStyle = '#ccc';
-      ctx.fillText('[P] / タップで再開', W / 2, 255);
+      ctx.fillText('PAUSE', W / 2, 190);
+      [['▶ 再開  [ P ]', 215, '#0066b2'], ['タイトルへ  [ Q ]', 285, '#7f8c8d']].forEach(([label, by, col]) => {
+        ctx.fillStyle = col; rr(W / 2 - 110, by, 220, 44, 10); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; rr(W / 2 - 110, by, 220, 44, 10); ctx.stroke();
+        ctx.fillStyle = '#fff'; ctx.font = `bold 16px ${FONT}`; ctx.fillText(label, W / 2, by + 28);
+      });
+      ctx.font = `12px ${FONT}`; ctx.fillStyle = '#aaa';
+      ctx.fillText('タイトルへ戻ると、今回の記録は残りません', W / 2, 350);
     }
 
     function drawGameOver() {
       overlay(0.88);
       ctx.textAlign = 'center';
-      ctx.fillStyle = '#e74c3c'; ctx.font = `bold 28px ${FONT}`;
-      ctx.fillText(lives <= 0 ? 'クレーム殺到！ GAME OVER' : 'レジ大混乱！ GAME OVER', W / 2, 80);
+      ctx.fillStyle = '#e74c3c'; ctx.font = `bold 24px ${FONT}`;
+      ctx.fillText(`${overReason} GAME OVER`, W / 2, 80);
 
       ctx.fillStyle = '#fff'; ctx.font = `16px ${FONT}`;
       ctx.fillText(`今回売上: ${score}pt  (STAGE ${wave})`, W / 2, 118);
@@ -1092,6 +1171,8 @@
         ctx.fillStyle = '#aaa'; ctx.font = `14px ${FONT}`;
         ctx.fillText('Press [ R ] / ENTER / TAP to Shift Again', W / 2, 400);
       }
+      ctx.fillStyle = '#7ec8ff'; ctx.font = `13px ${FONT}`;
+      ctx.fillText('▼ タイトルへ [ Q ] / ここをタップ', W / 2, 434);
     }
 
     // ------------------------------------------------------------------
@@ -1100,7 +1181,11 @@
     function updateHUD() {
       setText(ui.stage, String(wave));
       setText(ui.score, `${score} pt`);
-      setText(ui.best, String(Math.max(highScores[0], state === 'over' ? 0 : score)));
+      const showTime = timeLeft > 0 && (state === 'play' || state === 'paused');
+      setText(ui.time, showTime ? `${Math.ceil(timeLeft / 60)}s` : '--');
+      setClass(ui.time, showTime && timeLeft <= 600 ? 'badge danger' : 'badge');
+      ui.repBar.style.width = rep + '%';
+      setClass(ui.rep, 'gauge rep' + (rep < 25 ? ' low' : rep < 50 ? ' mid' : ''));
       setText(ui.lives, lives > 0 ? '♥'.repeat(lives) : '—');
       if (player.count > 0) {
         setText(ui.holding, `${NAMES[player.item]} ×${player.count}`);
