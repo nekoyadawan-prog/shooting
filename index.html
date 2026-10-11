@@ -149,6 +149,7 @@
       <div class="status-item"><span>TIME:</span><span id="ui-time" class="badge">--</span></div>
       <div class="status-item"><span>評判:</span><div id="ui-rep" class="gauge rep"><div id="ui-rep-bar"></div></div></div>
       <div class="status-item"><span>残機:</span><span id="ui-lives" class="lives">♥♥♥</span></div>
+      <div class="status-item"><span>レジ:</span><span id="ui-reg" class="lives">●●●</span></div>
       <div class="status-item"><span>手持ち:</span><span id="ui-holding" class="badge-item">からあげクン ×3</span></div>
       <div class="status-item">
         <span>掛け声:</span>
@@ -202,6 +203,7 @@
       rep: document.getElementById('ui-rep'),
       repBar: document.getElementById('ui-rep-bar'),
       lives: document.getElementById('ui-lives'),
+      reg: document.getElementById('ui-reg'),
       holding: document.getElementById('ui-holding'),
       gauge: document.getElementById('ui-gauge'),
       gaugeBar: document.getElementById('ui-gauge-bar'),
@@ -285,6 +287,8 @@
     let isNewRecord = false, lastRank = -1;
     let swayAmp = 16, touchTarget = null;
     let rep = 100, timeLeft = 0, overReason = '';
+    let continuesUsed = 0, contTimer = 0, contLock = 0, overLock = 0;
+    const MAX_CONT = 2; // コンテニュー回数の上限
     const registers = [100, 300, 500].map(x => ({ x, hp: 3, max: 3, fix: 0 }));
 
     let highScores = [0, 0, 0, 0, 0];
@@ -317,11 +321,14 @@
       if (BLOCK.includes(code)) e.preventDefault();
       if (e.repeat) { down[code] = true; return; }
       down[code] = true;
-      if ((code === 'Enter' || code === 'Space') && (state === 'title' || state === 'over')) { startGame(); return; }
+      if ((code === 'Enter' || code === 'Space') && confirmAction()) return;
       if (code === 'KeyX' || code === 'ShiftLeft' || code === 'ShiftRight') shout();
-      if (code === 'KeyR') startGame();
+      if (code === 'KeyR' && state !== 'continue' && !(state === 'over' && overLock > 0)) startGame();
       if (code === 'KeyP' || code === 'Escape') togglePause();
-      if (code === 'KeyQ' && (state === 'paused' || state === 'over')) goTitle();
+      if (code === 'KeyQ') {
+        if (state === 'continue') { if (contLock === 0) finalizeGameOver(); }
+        else if (state === 'paused' || (state === 'over' && overLock === 0)) goTitle();
+      }
       if (code === 'KeyM') toggleMute();
     });
     window.addEventListener('keyup', (e) => { down[e.code] = false; });
@@ -332,7 +339,11 @@
       const r = canvas.getBoundingClientRect();
       const y = (e.clientY - r.top) * H / r.height;
       if (state === 'title') startGame();
-      else if (state === 'over') { if (y > 412) goTitle(); else startGame(); }
+      else if (state === 'over') { if (overLock === 0) { if (y > 412) goTitle(); else startGame(); } }
+      else if (state === 'continue') {
+        if (y >= 340) { if (contLock === 0) finalizeGameOver(); }
+        else if (y >= 215 && y <= 310) confirmAction();
+      }
       else if (state === 'paused') { if (y >= 272) goTitle(); else togglePause(); }
     });
     document.querySelectorAll('[data-key]').forEach(b => {
@@ -341,7 +352,7 @@
         e.preventDefault(); initAudio(); down[code] = true;
         if (code === 'KeyX') shout();
         if (code === 'KeyP') togglePause();
-        if (code === 'Space' && (state === 'title' || state === 'over')) startGame();
+        if (code === 'Space') confirmAction();
       };
       const off = (e) => { e.preventDefault(); down[code] = false; };
       b.addEventListener('pointerdown', on);
@@ -360,7 +371,7 @@
       };
       pad.addEventListener('pointerdown', (e) => {
         e.preventDefault(); initAudio();
-        if (state === 'title' || state === 'over') { startGame(); return; }
+        if (state === 'title' || state === 'over' || state === 'continue') { confirmAction(); return; }
         if (state === 'paused') { togglePause(); return; }
         padId = e.pointerId;
         try { pad.setPointerCapture(e.pointerId); } catch (err) {}
@@ -388,6 +399,7 @@
       score = 0; combo = 0; wave = 1; lives = 3; gauge = 0; rep = 100; x2Timer = 0; timeLeft = 0;
       customers = []; thrown = []; bolts = []; powerups = []; particles = []; popups = [];
       waveClear = 0; entering = 0; freeze = 0; touchTarget = null; isNewRecord = false;
+      continuesUsed = 0; contLock = 0; overLock = 0;
       registers.forEach(r => { r.hp = r.max; r.fix = 0; });
       warmers.forEach(w => { w.stock = w.max; w.progress = 0; });
       player.item = 'KARAAGE'; player.count = MAX_CARRY; player.x = W / 2 - 24; player.y = 360;
@@ -411,6 +423,7 @@
       initAudio();
       score = 0; combo = 0; maxCombo = 0; served = 0; lives = 3; gauge = 0; x2Timer = 0;
       rep = 100; overReason = '';
+      continuesUsed = 0; contLock = 0; overLock = 0;
       wave = 1; invuln = 0; shake = 0; freeze = 0; waveClear = 0; fireCD = 0;
       isNewRecord = false; lastRank = -1;
       player.x = W / 2 - 24; player.y = 360; player.item = 'KARAAGE'; player.count = MAX_CARRY;
@@ -457,14 +470,39 @@
       addPopup(`STAGE ${wave}`, W / 2, 200, '#0066b2', 28, 100);
     }
 
+    // ゲームオーバー → まずコンテニュー画面(残り回数があれば)。あきらめる/時間切れで本当の終了
     function gameOver(reason) {
-      if (state === 'over') return;
+      if (state === 'over' || state === 'continue') return;
       overReason = reason || 'レジ大混乱！';
-      state = 'over'; shake = 12; SFX.over();
+      shake = 12; SFX.over(); combo = 0;
+      if (continuesUsed < MAX_CONT) { state = 'continue'; contTimer = 600; contLock = 40; }
+      else finalizeGameOver();
+    }
+
+    function finalizeGameOver() {
+      state = 'over'; overLock = 100; // 誤操作で即リスタートしないよう約1.7秒ロック
       saveHighScore(score);
       lastRank = score > 0 ? highScores.indexOf(score) : -1;
       isNewRecord = lastRank === 0;
-      combo = 0;
+    }
+
+    function doContinue() {
+      continuesUsed++;
+      score = Math.floor(score * 0.7);
+      lives = 3; rep = Math.max(rep, 60); combo = 0; invuln = 120; freeze = 0; waveClear = 0;
+      registers.forEach(r => { r.hp = r.max; r.fix = 0; });
+      bolts = []; thrown = []; powerups = [];
+      state = 'play';
+      spawnWave(); // 同じステージを最初からやり直し
+      addPopup('コンテニュー！', W / 2, 150, '#2ecc71', 24, 90);
+    }
+
+    // 決定操作(Enter / Space / タップ)。この状態で処理したらtrue
+    function confirmAction() {
+      if (state === 'title') { startGame(); return true; }
+      if (state === 'over') { if (overLock === 0) startGame(); return true; }
+      if (state === 'continue') { if (contLock === 0) doContinue(); return true; }
+      return false;
     }
 
     function addGauge(n) {
@@ -526,6 +564,13 @@
     function update() {
       frame++;
       updateEffects();
+      if (state === 'continue') {
+        if (contLock > 0) contLock--;
+        contTimer--;
+        if (contTimer > 0 && contTimer <= 600 && contTimer % 60 === 0) SFX.tick();
+        if (contTimer <= 0) finalizeGameOver();
+      }
+      if (state === 'over' && overLock > 0) overLock--;
       if (state !== 'play') return;
       if (fireCD > 0) fireCD--;
       if (invuln > 0) invuln--;
@@ -766,11 +811,16 @@
         b.x += b.vx || 0; b.y += b.vy;
         if (b.y > H + 10 || b.x < -10 || b.x > W + 10) { bolts.splice(i, 1); continue; }
         // レジが盾になる
-        const shield = registers.find(r => r.hp > 0 && b.x > r.x - 32 && b.x < r.x + 32 && b.y > COUNTER_Y - 46 && b.y < COUNTER_Y - 8);
+        const shield = registers.find(r => r.hp > 0 && b.x > r.x - 32 && b.x < r.x + 32 && b.y > COUNTER_Y - 52 && b.y < COUNTER_Y - 8);
         if (shield) {
           shield.hp--; bolts.splice(i, 1); shake = Math.max(shake, 3);
           SFX.crack(); burst(b.x, b.y, '#ffb142', 8);
-          if (shield.hp === 0) addPopup('レジ故障！', shield.x, COUNTER_Y - 58, '#ff4757', 14, 60);
+          if (shield.hp === 0) {
+            addPopup('レジ故障！', shield.x, COUNTER_Y - 66, '#ff4757', 14, 60);
+            const alive = registers.filter(r => r.hp > 0).length;
+            if (alive === 0) { gameOver('全レジ故障…会計不能！'); return; }
+            if (alive === 1) addPopup('あと1台！', W / 2, COUNTER_Y - 84, '#ff4757', 16, 80);
+          }
           continue;
         }
         if (invuln === 0 &&
@@ -906,32 +956,87 @@
       ctx.restore();
     }
 
+    // レジ(キャッシュレジスター): 客用ディスプレイ・キーパネル・現金引き出し・レシートで一目でレジとわかる形
     function drawRegisters() {
       registers.forEach(r => {
-        const x = r.x - 32, y = COUNTER_Y - 46, w = 64, h = 34;
-        const broken = r.hp <= 0;
+        const x0 = r.x - 32, y0 = COUNTER_Y - 52;
+        const hp = r.hp, broken = hp <= 0;
         ctx.save();
-        ctx.globalAlpha = broken ? 0.8 : 1;
-        ctx.fillStyle = broken ? '#3a3f47' : '#2c3e50'; rr(x, y, w, h, 5); ctx.fill();
-        ctx.fillStyle = r.hp >= 3 ? '#7ed6a8' : r.hp === 2 ? '#f6e58d' : r.hp === 1 ? '#ff9f6b' : '#20242a';
-        ctx.fillRect(x + 8, y + 5, w - 16, 14);
-        ctx.fillStyle = '#95a5a6'; ctx.fillRect(x + 8, y + 24, w - 16, 6);
+        if (broken) ctx.globalAlpha = 0.88;
+
+        // レシート(奥から出ている紙)
+        if (!broken) {
+          ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#b2bec3'; ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x0 + 48, y0 + 8); ctx.lineTo(x0 + 48, y0 - 6); ctx.lineTo(x0 + 58, y0 - 6); ctx.lineTo(x0 + 58, y0 + 8);
+          ctx.lineTo(x0 + 55, y0 + 5); ctx.lineTo(x0 + 52, y0 + 8); ctx.lineTo(x0 + 49, y0 + 5);
+          ctx.closePath(); ctx.fill(); ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x0 + 50, y0 - 3); ctx.lineTo(x0 + 56, y0 - 3);
+          ctx.moveTo(x0 + 50, y0 + 0); ctx.lineTo(x0 + 56, y0 + 0);
+          ctx.stroke();
+        }
+
+        // 客用ディスプレイ(ポール付き)
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(x0 + 17, y0 + 9, 4, 6);
+        rr(x0 + 6, y0, 28, 13, 3); ctx.fill();
+        ctx.fillStyle = broken ? '#15181c' : hp >= 3 ? '#7ee8a8' : hp === 2 ? '#f6e58d' : '#ff9f6b';
+        ctx.fillRect(x0 + 8, y0 + 2, 24, 9);
+        ctx.fillStyle = broken ? '#ff4757' : '#1b4d36';
+        ctx.font = `bold 8px ${FONT}`; ctx.textAlign = 'right';
+        ctx.fillText(broken ? '×××' : '¥ 128', x0 + 31, y0 + 9.5);
+
+        // 操作パネル(斜め)とキー
+        ctx.fillStyle = broken ? '#3a3f47' : '#34495e';
+        ctx.beginPath();
+        ctx.moveTo(x0 + 3, y0 + 14); ctx.lineTo(x0 + 61, y0 + 14); ctx.lineTo(x0 + 64, y0 + 25); ctx.lineTo(x0, y0 + 25);
+        ctx.closePath(); ctx.fill();
+        for (let kr = 0; kr < 2; kr++) {
+          for (let kc = 0; kc < 7; kc++) {
+            if (broken && ((kr * 7 + kc) % 3 === 0)) continue; // 壊れて欠けたキー
+            ctx.fillStyle = kc === 6 ? '#e67e22' : '#ecf0f1';
+            ctx.fillRect(x0 + 6 + kc * 7.7 + kr, y0 + 16.5 + kr * 4.6, 6, 3.4);
+          }
+        }
+
+        // 現金引き出し(本体)
+        ctx.fillStyle = broken ? '#8b949e' : '#dfe6ee';
+        rr(x0, y0 + 25, 64, 15, 3); ctx.fill();
+        ctx.strokeStyle = '#2c3e50'; ctx.lineWidth = 1.5; rr(x0, y0 + 25, 64, 15, 3); ctx.stroke();
+        ctx.fillStyle = '#0066b2'; ctx.fillRect(x0 + 3, y0 + 28, 58, 3);
+        ctx.fillStyle = broken ? '#c0392b' : '#2c3e50';
+        ctx.font = `bold 9px ${FONT}`; ctx.textAlign = 'left';
+        ctx.fillText(broken ? '故障中' : 'レジ', x0 + 5, y0 + 38.5);
+        ctx.fillStyle = '#7f8c8d'; ctx.fillRect(x0 + 36, y0 + 34, 22, 3.5);
         ctx.restore();
-        ctx.strokeStyle = '#1b1b1b'; ctx.lineWidth = 1.5;
-        if (r.hp <= 2) { ctx.beginPath(); ctx.moveTo(x + 22, y + 5); ctx.lineTo(x + 28, y + 12); ctx.lineTo(x + 24, y + 19); ctx.stroke(); }
-        if (r.hp <= 1) { ctx.beginPath(); ctx.moveTo(x + 40, y + 5); ctx.lineTo(x + 36, y + 11); ctx.lineTo(x + 44, y + 19); ctx.stroke(); }
+
+        // ダメージ表現
+        ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
+        if (hp <= 2) { ctx.beginPath(); ctx.moveTo(x0 + 26, y0 + 14); ctx.lineTo(x0 + 31, y0 + 22); ctx.lineTo(x0 + 27, y0 + 30); ctx.stroke(); }
+        if (hp <= 1) { ctx.beginPath(); ctx.moveTo(x0 + 44, y0 + 16); ctx.lineTo(x0 + 39, y0 + 24); ctx.lineTo(x0 + 46, y0 + 34); ctx.stroke(); }
+
+        // 耐久
         for (let i = 0; i < r.max; i++) {
-          ctx.fillStyle = i < r.hp ? '#2ecc71' : 'rgba(0,0,0,0.25)';
-          ctx.fillRect(x + w / 2 - 17 + i * 12, y - 8, 10, 4);
+          ctx.fillStyle = i < hp ? '#2ecc71' : 'rgba(0,0,0,0.28)';
+          ctx.fillRect(x0 + 15 + i * 12, y0 - 10, 10, 4);
         }
+
+        // 故障中: 煙と火花
         if (broken) {
-          ctx.fillStyle = '#ff4757'; ctx.font = `bold 11px ${FONT}`; ctx.textAlign = 'center';
-          ctx.fillText('故障中', r.x, y + 16);
-          if (Math.floor(frame / 10) % 2 === 0) { ctx.fillStyle = '#ffd700'; ctx.fillRect(x + 6 + (frame % 48), y - 3, 3, 3); }
+          const t = frame * 0.08;
+          for (let s = 0; s < 3; s++) {
+            const sy = (frame * 0.6 + s * 14) % 42;
+            ctx.fillStyle = `rgba(120,120,120,${0.45 - sy / 100})`;
+            ctx.beginPath(); ctx.arc(x0 + 32 + Math.sin(t + s * 2) * 5, y0 - 4 - sy, 4 + sy / 10, 0, 7); ctx.fill();
+          }
+          if (Math.floor(frame / 8) % 2 === 0) { ctx.fillStyle = '#ffd700'; ctx.fillRect(x0 + 10 + (frame * 3) % 44, y0 + 12, 3, 3); }
         }
+
+        // 修理の進み具合
         if (r.fix > 0) {
-          ctx.fillStyle = '#111'; ctx.fillRect(x, y + h + 4, w, 5);
-          ctx.fillStyle = '#2ecc71'; ctx.fillRect(x, y + h + 4, w * r.fix / 45, 5);
+          ctx.fillStyle = '#111'; ctx.fillRect(x0, y0 + 43, 64, 5);
+          ctx.fillStyle = '#2ecc71'; ctx.fillRect(x0, y0 + 43, 64 * r.fix / 45, 5);
         }
       });
     }
@@ -1092,6 +1197,7 @@
 
       if (state === 'title') drawTitle();
       else if (state === 'paused') drawPause();
+      else if (state === 'continue') drawContinue();
       else if (state === 'over') drawGameOver();
 
       updateHUD();
@@ -1115,7 +1221,7 @@
         '什器に乗ると商品をゲット（最大3個・自動補充）',
         '列はゆれる。前列のすき間を狙えば後ろの列も撃てる',
         '違う商品を当てると、お客さんが怒ってこちらを狙い撃ち！',
-        'レジは盾。壊れたら前に立って修理しよう',
+        'レジは盾。全部壊れると会計できず閉店！ 前に立って修理',
         'ゲージが溜まったら「あげたてー！」で一気に逆転',
         '制限時間つき。時間切れ・誤爆で評判が落ち、0で閉店…'
       ].forEach((t, i) => ctx.fillText(t, W / 2, 232 + i * 22));
@@ -1141,6 +1247,36 @@
       ctx.fillText('タイトルへ戻ると、今回の記録は残りません', W / 2, 350);
     }
 
+    function drawContinue() {
+      overlay(0.86);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#e74c3c'; ctx.font = `bold 22px ${FONT}`;
+      ctx.fillText(overReason, W / 2, 78);
+      ctx.fillStyle = '#fff'; ctx.font = `bold 34px ${FONT}`;
+      ctx.fillText('CONTINUE ?', W / 2, 135);
+      const sec = Math.max(0, Math.ceil(contTimer / 60));
+      ctx.fillStyle = sec <= 3 ? '#ff6b6b' : '#ffeaa7'; ctx.font = `bold 64px ${FONT}`;
+      ctx.fillText(String(sec), W / 2, 200);
+
+      const ready = contLock === 0;
+      ctx.globalAlpha = ready ? 1 : 0.45;
+      ctx.fillStyle = '#0066b2'; rr(W / 2 - 130, 225, 260, 56, 12); ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; rr(W / 2 - 130, 225, 260, 56, 12); ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.font = `bold 18px ${FONT}`;
+      ctx.fillText('▶ コンテニュー [ Enter ]', W / 2, 260);
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = '#bcd'; ctx.font = `13px ${FONT}`;
+      ctx.fillText(`同じステージから再開 ・ 売上 ${score} → ${Math.floor(score * 0.7)}pt (-30%)`, W / 2, 308);
+      ctx.fillText(`残りコンテニュー ${MAX_CONT - continuesUsed}回`, W / 2, 328);
+
+      ctx.globalAlpha = ready ? 1 : 0.45;
+      ctx.fillStyle = '#7f8c8d'; rr(W / 2 - 90, 352, 180, 38, 10); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = `bold 14px ${FONT}`;
+      ctx.fillText('あきらめる [ Q ]', W / 2, 376);
+      ctx.globalAlpha = 1;
+    }
+
     function drawGameOver() {
       overlay(0.88);
       ctx.textAlign = 'center';
@@ -1150,7 +1286,7 @@
       ctx.fillStyle = '#fff'; ctx.font = `16px ${FONT}`;
       ctx.fillText(`今回売上: ${score}pt  (STAGE ${wave})`, W / 2, 118);
       ctx.font = `13px ${FONT}`; ctx.fillStyle = '#bcd';
-      ctx.fillText(`接客数 ${served}人  /  最大コンボ ×${maxCombo}`, W / 2, 142);
+      ctx.fillText(`接客数 ${served}人  /  最大コンボ ×${maxCombo}` + (continuesUsed > 0 ? `  /  コンテニュー ${continuesUsed}回` : ''), W / 2, 142);
 
       if (isNewRecord) {
         ctx.fillStyle = Math.floor(frame / 8) % 2 ? '#ffeaa7' : '#ff7675';
@@ -1167,12 +1303,17 @@
         ctx.fillText(`${ranks[i]}: ${hs} pt`, W / 2, 242 + i * 26);
       });
 
-      if (Math.floor(frame / 30) % 2 === 0) {
-        ctx.fillStyle = '#aaa'; ctx.font = `14px ${FONT}`;
-        ctx.fillText('Press [ R ] / ENTER / TAP to Shift Again', W / 2, 400);
+      if (overLock > 0) {
+        ctx.fillStyle = '#667'; ctx.font = `14px ${FONT}`;
+        ctx.fillText('お疲れさまでした…', W / 2, 400);
+      } else {
+        if (Math.floor(frame / 30) % 2 === 0) {
+          ctx.fillStyle = '#aaa'; ctx.font = `14px ${FONT}`;
+          ctx.fillText('Press [ R ] / ENTER / TAP to Shift Again', W / 2, 400);
+        }
+        ctx.fillStyle = '#7ec8ff'; ctx.font = `13px ${FONT}`;
+        ctx.fillText('▼ タイトルへ [ Q ] / ここをタップ', W / 2, 434);
       }
-      ctx.fillStyle = '#7ec8ff'; ctx.font = `13px ${FONT}`;
-      ctx.fillText('▼ タイトルへ [ Q ] / ここをタップ', W / 2, 434);
     }
 
     // ------------------------------------------------------------------
@@ -1187,6 +1328,9 @@
       ui.repBar.style.width = rep + '%';
       setClass(ui.rep, 'gauge rep' + (rep < 25 ? ' low' : rep < 50 ? ' mid' : ''));
       setText(ui.lives, lives > 0 ? '♥'.repeat(lives) : '—');
+      const regAlive = registers.filter(r => r.hp > 0).length;
+      setText(ui.reg, '●'.repeat(regAlive) + '○'.repeat(registers.length - regAlive));
+      ui.reg.style.color = regAlive <= 1 ? '#ff6b6b' : '#7ed6a8';
       if (player.count > 0) {
         setText(ui.holding, `${NAMES[player.item]} ×${player.count}`);
         setClass(ui.holding, 'badge-item');
